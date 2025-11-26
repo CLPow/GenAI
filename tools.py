@@ -23,13 +23,14 @@ print(f"GOOGLE_API_KEY is loaded: {bool(os.getenv('GOOGLE_API_KEY'))}")
 # Chat model imports
 ChatGoogleGenerativeAI = None
 try:
-    # Use the LangChain Core Pydantic structure
+    # Ensure this core package is installed: pip install langchain-google-genai
     from langchain_google_genai import ChatGoogleGenerativeAI  # type: ignore
     from langchain_core.messages import SystemMessage, HumanMessage, BaseMessage
-    from langchain_core.pydantic_v1 import BaseModel as V1BaseModel
+    # The problematic langchain_core.pydantic_v1 import is removed here.
     from langchain_core.output_parsers import PydanticOutputParser
-except Exception as e: # <-- CHANGE HERE
-    # CRITICAL: Print the import error details
+    # Note: We rely on 'BaseModel as V1BaseModel' from the top of the file.
+except Exception as e:
+    # Keep the prints for final diagnostic confirmation
     print("🛑 IMPORT FAILED: ChatGoogleGenerativeAI or a dependency is missing/conflicting.")
     print(f"🛑 Import Error Details: {e}")
     ChatGoogleGenerativeAI = None
