@@ -1,137 +1,134 @@
 #!/usr/bin/env python3
 """
-Tooling: retrieval + generation + save.
-
-This version uses ChatGoogleGenerativeAI when LLM_PROVIDER=google (and langchain_google_genai installed).
-Fallback: uses ChatOpenAI if env indicates OpenAI or if import fails.
+Tooling: generation + save. Retriever handled via similarity_search in main.py.
 """
 import os
 import json
+import re
 from pathlib import Path
 from dotenv import load_dotenv
 from typing import List
-from pydantic import BaseModel
+from pydantic import BaseModel as V1BaseModel
+from pydantic import Field
 
 load_dotenv()
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "google").lower()
+LLM_TEMP = float(os.getenv("LLM_TEMPERATURE", 0.0))
+GOOGLE_MODEL_NAME = os.getenv("GOOGLE_MODEL_NAME", "gemini-2.5-flash")
+OPENAI_MODEL_NAME = os.getenv("OPENAI_MODEL_NAME", "gpt-4o-mini") 
 
-# LangChain imports
-from langchain.vectorstores import Chroma
-from langchain.schema import SystemMessage, HumanMessage
+print(f"LLM Provider: {LLM_PROVIDER}")
+print(f"GOOGLE_API_KEY is loaded: {bool(os.getenv('GOOGLE_API_KEY'))}")
 
-# Chat model imports: try Google first
+# Chat model imports
 ChatGoogleGenerativeAI = None
 try:
+    # Use the LangChain Core Pydantic structure
     from langchain_google_genai import ChatGoogleGenerativeAI  # type: ignore
-    ChatGoogleGenerativeAI = ChatGoogleGenerativeAI
-except Exception:
+    from langchain_core.messages import SystemMessage, HumanMessage, BaseMessage
+    from langchain_core.pydantic_v1 import BaseModel as V1BaseModel
+    from langchain_core.output_parsers import PydanticOutputParser
+except Exception as e: # <-- CHANGE HERE
+    # CRITICAL: Print the import error details
+    print("🛑 IMPORT FAILED: ChatGoogleGenerativeAI or a dependency is missing/conflicting.")
+    print(f"🛑 Import Error Details: {e}")
     ChatGoogleGenerativeAI = None
 
-# Fallback to ChatOpenAI if available
 ChatOpenAI = None
 try:
     from langchain.chat_models import ChatOpenAI  # type: ignore
-    ChatOpenAI = ChatOpenAI
+    from langchain_core.messages import SystemMessage, HumanMessage, BaseMessage
+    from langchain_core.pydantic_v1 import BaseModel as V1BaseModel
+    from langchain_core.output_parsers import PydanticOutputParser
 except Exception:
     ChatOpenAI = None
 
-# Document model for generated tests
-class GeneratedTest(BaseModel):
-    filename: str
-    language: str
-    framework: str
-    content: str
-    description: str
-    metadata: dict | None = None
 
+# Document model for generated tests
+class GeneratedTest(V1BaseModel):
+    filename: str = Field(description="The suggested filename for the test script (e.g., test_math.py).")
+    language: str = Field(description="The primary programming language of the test (e.g., python).")
+    framework: str = Field(description="The testing framework used (e.g., pytest, unittest, jest).")
+    content: str = Field(description="The full, runnable code content of the test script, including imports.")
+    description: str = Field(description="A brief description of what this specific test does.")
+    metadata: dict | None = Field(description="Optional extra metadata.", default=None)
+
+# Define the expected full output structure (a list of tests)
+class GeneratedTestList(V1BaseModel):
+    tests: List[GeneratedTest] = Field(description="A JSON array containing 1 to 3 GeneratedTest objects.")
 
 PERSIST_DIR = os.getenv("CHROMA_PERSIST_DIR", "./chroma_db")
 
 
-def get_retriever(persist_dir: str = PERSIST_DIR, k: int = 4):
-    if not Path(persist_dir).exists():
-        raise FileNotFoundError(f"Chroma DB not found in {persist_dir}; run ingest.py first")
-    vectordb = Chroma(persist_directory=persist_dir)
-    return vectordb.as_retriever(search_type="similarity", search_kwargs={"k": k})
-
-
-def _make_chat_model(temperature: float = 0.0):
-    """
-    Factory that returns a chat model instance. If provider==google and langchain_google_genai installed,
-    returns a ChatGoogleGenerativeAI instance. Otherwise falls back to ChatOpenAI.
-    """
-    if LLM_PROVIDER == "google" and ChatGoogleGenerativeAI is not None:
-        # instantiate Gemini / Google Generative model
-        # model name can be "gemini-2.5-flash" or another available one in your account
+def _make_chat_model(temperature: float = LLM_TEMP):
+    """Factory that returns a chat model instance."""
+    if LLM_PROVIDER == "google" and ChatGoogleGenerativeAI:
         try:
             return ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=temperature)
-        except TypeError:
-            # Some wrappers accept different kwargs — fall back to default constructor
-            return ChatGoogleGenerativeAI(model="gemini-2.5-flash")
-    if ChatOpenAI is not None:
-        # Use OpenAI Chat model as fallback
-        return ChatOpenAI(temperature=temperature, model_name="gpt-4o-mini")
-    raise RuntimeError("No usable chat model found. Install langchain_google_genai or set up ChatOpenAI.")
+        except Exception as e:
+            # THIS IS THE CRITICAL CHANGE: Print the actual error
+            print(f"🛑 CRITICAL ERROR: Failed to initialize ChatGoogleGenerativeAI.")
+            print(f"🛑 Reason: {e}")
+            pass
+    if ChatOpenAI:
+        return ChatOpenAI(temperature=temperature, model_name=OPENAI_MODEL_NAME)
+    raise RuntimeError("No usable chat model found.")
 
 
-def generate_tests(prompt_request: str, retrieved_context: List[str], temperature: float = 0.0) -> List[GeneratedTest]:
+def generate_chat_response(messages: List[BaseMessage], temperature: float = 0.7) -> str:
     """
-    Use an LLM to generate 1..N test files as JSON array. This function instructs the model to return JSON only.
+    Generates a free-form text response using the chat model and conversation history.
+    Uses a higher temperature for conversational flow.
     """
     chat = _make_chat_model(temperature=temperature)
+    
+    try:
+        # Invoke the chat model directly with the full message history
+        response = chat.invoke(messages)
+        return response.content
+        
+    except Exception as e:
+        raise RuntimeError(f"Failed to generate chat response from model: {e}")
+
+
+def generate_tests(prompt_request: str, retrieved_context: list, temperature: float = LLM_TEMP):
+    """Generates structured test code using the structured output chain."""
+    chat = _make_chat_model(temperature=temperature)
+
+    chat_with_structured_output = chat.with_structured_output(GeneratedTestList)
 
     system_text = (
         "You are an assistant that writes runnable test scripts. "
-        "Given style examples and a user request, return a JSON array of objects with keys: "
-        "filename, language, framework, content, description, metadata. "
-        "Return ONLY valid JSON (no extra commentary)."
+        "Your task is to return a JSON object that strictly adheres to the provided schema. "
+        "The 'tests' key must contain an array of 1..3 test objects. "
+        "Ensure the 'content' is runnable code including all necessary imports."
     )
-    system_msg = SystemMessage(content=system_text)
 
     examples_text = "\n\n---\n\n".join(retrieved_context) if retrieved_context else "No examples provided."
-
     human_text = (
         f"CONTEXT EXAMPLES (style hints):\n{examples_text}\n\n"
         f"USER REQUEST:\n{prompt_request}\n\n"
-        "Return only a JSON array. Generate 1..3 tests as needed. Keep code runnable and include imports and run instructions."
+        "Return only a JSON object that matches the schema. Generate 1 to 3 tests as needed."
     )
-    human_msg = HumanMessage(content=human_text)
 
-    # Call model. LangChain chat models accept a list of messages.
-    # ChatGoogleGenerativeAI and ChatOpenAI both accept calling with [SystemMessage, HumanMessage]
-    resp = chat([system_msg, human_msg])
-    # The returned object shape may vary by langchain version; attempt safe extraction:
-    raw = ""
+    messages = [
+        SystemMessage(content=system_text),
+        HumanMessage(content=human_text)
+    ]
+
     try:
-        # common interface: resp.content or resp[0].content
-        raw = getattr(resp, "content", None) or (resp[0].content if isinstance(resp, (list, tuple)) else None) or str(resp)
-    except Exception:
-        raw = str(resp)
-
-    raw = raw.strip()
-    # Parse JSON. Be forgiving if the model included backticks or code fences.
-    try:
-        parsed = json.loads(raw)
-    except Exception:
-        import re
-        m = re.search(r"(\[.*\])", raw, re.S)
-        if m:
-            parsed = json.loads(m.group(1))
-        else:
-            raise ValueError(f"Failed to parse JSON from model output.\nModel output:\n{raw}")
-
-    tests = []
-    for obj in parsed:
-        tests.append(GeneratedTest(**obj))
-    return tests
+        parsed_response: GeneratedTestList = chat_with_structured_output.invoke(messages)
+        return parsed_response.tests 
+        
+    except Exception as e:
+        raise RuntimeError(f"Failed to generate structured response from model: {e}")
 
 
 def save_files(tests: List[GeneratedTest], out_dir: str = "./generated_tests") -> dict:
     Path(out_dir).mkdir(parents=True, exist_ok=True)
     results = []
     for t in tests:
-        filename = t.filename
-        target = Path(out_dir) / filename
+        target = Path(out_dir) / t.filename
         target.parent.mkdir(parents=True, exist_ok=True)
         try:
             with open(target, "w", encoding="utf-8") as fh:

@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """
-Example driver: query the retriever, call the generator, and save generated tests.
+Example driver: query the vector store, call the generator, and save generated tests.
 
-Usage:
-    python main.py
+Refactored to initialize Chroma with an embedding model and use the retriever interface.
 """
 import os
 from dotenv import load_dotenv
-from tools import get_retriever, generate_tests, save_files
+from tools import generate_tests, save_files, PERSIST_DIR
+from langchain_chroma import Chroma
+# Import the embedding factory from ingest.py for consistency
+from ingest import create_embeddings
+from langchain_core.documents import Document # For type hinting/clarity
 
 load_dotenv()
 
@@ -18,13 +21,21 @@ def run_example():
         "The project prefers simple fixtures and clear assertions. Use style similar to the provided examples."
     )
 
-    # Load retriever and fetch top k context chunks
-    retriever = get_retriever()
-    docs = retriever.get_relevant_documents(user_request)  # returns Document objects
+    # Load embedding model (must be the same one used in ingest.py)
+    embeddings = create_embeddings() 
+    
+    # Load vector DB, explicitly passing embeddings (Refactored L26)
+    vectordb = Chroma(persist_directory=PERSIST_DIR, embedding_function=embeddings)
+    
+    # Use as_retriever for idiomatic LangChain retrieval (Refactored L27)
+    retriever = vectordb.as_retriever(search_kwargs={"k": 4}) 
+    docs: List[Document] = retriever.invoke(user_request)
+
     # Convert docs into plain strings with filename metadata for style guidance
     context = []
     for d in docs:
-        meta = d.metadata if hasattr(d, "metadata") else {}
+        # Simplified access, assuming standard Document structure (Refactored L31-L35)
+        meta = d.metadata
         filename = meta.get("filename", meta.get("source", "unknown"))
         piece = f"File: {filename}\n{d.page_content}"
         context.append(piece)
@@ -47,4 +58,6 @@ def run_example():
     print("Save result:", save_result)
 
 if __name__ == "__main__":
+    # Ensure create_embeddings is imported from ingest to avoid circular imports if possible
+    # In a real project, this helper would typically be in its own utility file.
     run_example()

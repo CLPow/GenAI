@@ -2,9 +2,8 @@
 """
 Ingest plain text test script files into a vector DB with chunking.
 
-This version prefers local HuggingFace embeddings as a reliable fallback.
-If you have Vertex / Google embeddings set up (service account + LangChain VertexAIEmbeddings),
-the script will try to use them when LLM_PROVIDER=google and GOOGLE_APPLICATION_CREDENTIALS is set.
+Refactored to use LangChain's DirectoryLoader for standard document loading
+and explicit Document objects for clear Chroma integration.
 """
 import argparse
 import os
@@ -13,44 +12,54 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-DEFAULT_DATA_DIR = os.getenv("DATA_DIR", "./data")
-DEFAULT_PERSIST_DIR = os.getenv("CHROMA_PERSIST_DIR", "./chroma_db")
-LLM_PROVIDER = os.getenv("LLM_PROVIDER", "").lower()
+# --- Imports for Document Loading ---
+from langchain_community.document_loaders import DirectoryLoader, TextLoader 
+# --- Imports for Splitting and DB ---
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_chroma import Chroma
+from langchain_core.documents import Document # Explicit Document class
 
-# LangChain imports (ensure requirements installed)
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.vectorstores import Chroma
-
-# Embeddings imports (we'll try Vertex/Google if available, otherwise HuggingFace local)
+# --- Imports for Embeddings ---
 try:
-    # VertexAIEmbeddings is available when using Google Vertex via LangChain
-    from langchain.embeddings import VertexAIEmbeddings  # type: ignore
+    from langchain_community.embeddings import VertexAIEmbeddings  # type: ignore
 except Exception:
     VertexAIEmbeddings = None
 
-from langchain.embeddings import HuggingFaceEmbeddings
+from langchain_community.embeddings import HuggingFaceEmbeddings
 try:
-    from langchain.embeddings import OpenAIEmbeddings  # optional
+    from langchain_community.embeddings import OpenAIEmbeddings  # optional
 except Exception:
     OpenAIEmbeddings = None
 
 
+DEFAULT_DATA_DIR = os.getenv("DATA_DIR", "./data")
+DEFAULT_PERSIST_DIR = os.getenv("CHROMA_PERSIST_DIR", "./chroma_db")
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "").lower()
+
+
 def create_embeddings():
-    # If provider is google and VertexAIEmbeddings available and GOOGLE_APPLICATION_CREDENTIALS is set, use Vertex
+    """Factory that returns an embedding model instance."""
     if LLM_PROVIDER == "google" and VertexAIEmbeddings and os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
         try:
+            print("Using VertexAIEmbeddings.")
             return VertexAIEmbeddings()
         except Exception as e:
-            print("VertexAIEmbeddings import succeeded but instantiation failed:", e)
+            print("VertexAIEmbeddings instantiation failed:", e)
             print("Falling back to HuggingFaceEmbeddings.")
-    # If OPENAI_API_KEY present and OpenAIEmbeddings available, you could use it (optional)
+
     if os.getenv("OPENAI_API_KEY") and OpenAIEmbeddings is not None:
         try:
+            print("Using OpenAIEmbeddings.")
             return OpenAIEmbeddings()
         except Exception:
             pass
-    # Fallback: local HuggingFace embeddings (no external quota)
-    return HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+
+    # Fallback: local HuggingFace embeddings
+    try:
+        print("Using HuggingFaceEmbeddings.")
+        return HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+    except Exception as e:
+        raise RuntimeError(f"Failed to instantiate HuggingFaceEmbeddings: {e}")
 
 
 def ingest_folder(data_dir: str, persist_dir: str, chunk_size: int = 600, chunk_overlap: int = 100):
@@ -58,33 +67,43 @@ def ingest_folder(data_dir: str, persist_dir: str, chunk_size: int = 600, chunk_
     if not data_path.exists():
         raise FileNotFoundError(f"{data_dir} not found. Create it and add your .txt files.")
 
-    docs = []
-    for p in data_path.rglob("*.txt"):
-        text = p.read_text(encoding="utf-8", errors="ignore")
-        metadata = {"source": str(p), "filename": p.name}
-        docs.append({"page_content": text, "metadata": metadata})
+    # 1. Load documents using DirectoryLoader (Refactored L55/L62-L68)
+    print(f"Loading documents from {data_dir}...")
+    loader = DirectoryLoader(
+        data_dir,
+        glob="**/*.txt",
+        loader_cls=TextLoader,
+        loader_kwargs={"encoding": "utf-8"} # <-- Fixed
+    )
+    docs: List[Document] = loader.load()
 
-    # Chunking
-    splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
-    split_texts = []
-    for d in docs:
-        chunks = splitter.split_text(d["page_content"])
-        for idx, c in enumerate(chunks):
-            md = d["metadata"].copy()
-            md["chunk"] = idx
-            split_texts.append({"page_content": c, "metadata": md})
-
-    if not split_texts:
+    if not docs:
         print("No .txt files found in", data_dir)
         return None
 
-    embeddings = create_embeddings()
-    texts = [s["page_content"] for s in split_texts]
-    metadatas = [s["metadata"] for s in split_texts]
+    # 2. Chunking
+    print(f"Splitting {len(docs)} document(s) into chunks...")
+    splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+    split_docs = splitter.split_documents(docs)
 
-    vectordb = Chroma.from_documents(documents=texts, embedding=embeddings, metadatas=metadatas, persist_directory=persist_dir)
-    vectordb.persist()
-    print(f"Ingested {len(texts)} chunks into Chroma at {persist_dir}")
+    # 3. Create Embeddings and Ingest (Refactored L80 to use split_docs directly)
+    embeddings = create_embeddings()
+    
+    # Note: Chroma.from_documents expects a list of Document objects
+    vectordb = Chroma.from_documents(
+        documents=split_docs, 
+        embedding=embeddings,
+        persist_directory=persist_dir
+    )
+    
+    # vectordb.persist() is deprecated in new Chroma, persistence happens on creation
+    # but calling it doesn't hurt if you are on an older version.
+    try:
+        vectordb.persist()
+    except Exception:
+        pass # Ignore if not supported
+
+    print(f"Ingested {len(split_docs)} chunks into Chroma at {persist_dir}")
     return vectordb
 
 
