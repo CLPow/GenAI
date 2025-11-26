@@ -1,41 +1,80 @@
-# Test-Script Generator (RAG) — Starter Project
+# 📄 Project Readme: RAG Code Generator AI
 
-Overview
-- This project ingests plain `.txt` test scripts and related docs, indexes them into a vector store, and exposes a simple agent pipeline that retrieves relevant examples and asks an LLM to generate new test scripts in the same style.
+🎯 Overview
+This project is an Retrieval-Augmented Generation (RAG) system designed to automatically generate high-quality unit tests based on your existing codebase style and specific user requests. It uses a Chroma vector database for retrieval and supports a variety of Large Language Models (LLMs) for generation, including Google Gemini, OpenAI, and local models via Ollama.
 
-Folder layout
-- data/                # drop your .txt test scripts here
-- ingest.py            # splits files into chunks and persists into a vector DB (Chroma by default)
-- tools.py             # tool wrappers: generate_tests_tool, save_tool, retrieval helpers
-- main.py              # example usage: query retriever + LLM to generate tests
-- cli_chat.py          # able to chat with AI like how GPT works
-- requirements.txt
-- .env.sample
+Key Features:
 
-Quickstart
-1. Create a Python 3.11+ virtualenv and install requirements:
-   python -m venv .venv
-   source .venv/bin/activate
-   pip install -r requirements.txt
+Context-Aware Generation: Uses RAG to retrieve examples from your codebase's style guide and existing tests.
 
-2. Put your .txt test scripts in the `data/` directory. Recommend file metadata in filenames, e.g. `pytest_my_module_auth_flow.txt`, but metadata can also be added later.
+Structured Output: Generates tests as clean, parsed JSON objects defined by Pydantic models.
 
-3. Copy `.env.sample` to `.env` and set your API keys (e.g., OPENAI_API_KEY, or configure Google/Gemini per your provider).
+Flexible Deployment: Easily switch between cloud APIs and local LLMs.
+__________________________________________________________________________________________________________________
 
-4. Ingest files:
-   python ingest.py --data-dir ./data --persist-dir ./chroma_db
+⚙️ Setup and Installation
+This project requires Python 3.11 or higher due to modern dependency requirements (LangChain V0.2+ and Pydantic V2).
 
-   This creates/updates a local Chroma DB.
+1. Clone the Repository and Set Up the Environment
+```
+# Clone the repository
+git clone https://github.com/CLPow/GenAI.git
+cd your-repo-name
 
-5. Run and Chat with AI (The AI will remember last conversation):
-   python cli_chat.py
+# Create a new virtual environment (Requires Python 3.11+ to be installed)
+# Use 'py -3.11 -m venv venv' if 'python' defaults to an older version.
+python -m venv venv
 
-   The script loads retriever context and sends a generation request to the LLM. The generated test(s) will be printed and saved (by default, into ./generated_tests/).
+# Activate the environment
+# Windows (PowerShell):
+.\venv\Scripts\Activate
+# Linux/macOS:
+# source venv/bin/activate
+```
+2. Install Dependencies
+Install all required Python packages:
+```
+pip install -U python-dotenv pydantic langchain-core langchain-community langchain-chroma langchain-text-splitters langchain-google-genai sentence-transformers
+```
 
-Important notes
-- Security: Do not upload secrets. Sanitize any credentials inside files before ingestion.
-- Execution: Generated tests may contain arbitrary code. Only execute them in a sandboxed environment.
-- Embeddings: By default, the code uses OpenAI embeddings. You can swap in any embeddings provider supported by LangChain or Chroma.
-- Tuning: Use k=3..6 retrieved examples for best results; keep the LLM temperature low for deterministic code output.
+3. Configure API Keys
+Create a file named .env in the root directory and set your API keys and provider preference.
+```
+# --- LLM Provider Selection ---
+# To use Google, set: LLM_PROVIDER=google
+# To use Ollama (local), set: LLM_PROVIDER=ollama
+# To use OpenAI, set: LLM_PROVIDER=openai
+LLM_PROVIDER=google
 
-Tested with Gemini API key, will try with local LLM for Privacy.
+# --- Google Gemini Configuration ---
+GOOGLE_API_KEY=YOUR_GEMINI_API_KEY_HERE
+# GOOGLE_MODEL_NAME=gemini-2.5-flash (Optional override, defaults to this)
+
+# --- OpenAI Configuration (Uncomment to use) ---
+# OPENAI_API_KEY=YOUR_OPENAI_API_KEY_HERE
+# OPENAI_MODEL_NAME=gpt-4o-mini (Optional override)
+
+# --- Vector Store Configuration ---
+CHROMA_PERSIST_DIR=./chroma_db
+```
+
+🌐 Switching to Local LLMs (Ollama)
+To run a Llama model locally, follow these steps:
+1. Install Ollama: Download and install the Ollama application for your OS.
+2. Download Model: Download a model like Llama 3 from your command line:
+   ```ollama pull llama3```
+3. Update .env: Change the provider setting in your .env file:
+   ```LLM_PROVIDER=ollama```
+The application will automatically use the llama3 model served by your local Ollama instance.
+__________________________________________________________________________________________________________________
+
+🏃 How to Run
+1. Ingest Data (First Time Only)
+Ingest your test scripts or style examples (in plain text format) into the vector database. This powers the RAG retrieval.
+```
+(venv) PS D:\AI> python ingest.py
+# Example output: Ingested 52 chunks into Chroma at ./chroma_db
+```
+2. Run the Interactive CLI
+Start the interactive chat interface to generate code or ask general questions.
+```python cli_chat.py```
