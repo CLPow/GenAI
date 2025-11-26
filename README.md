@@ -72,9 +72,10 @@ ________________________________________________________________________________
 1. Ingest Data (First Time Only)
 Ingest your test scripts or style examples (in plain text format) into the vector database. This powers the RAG retrieval.
 ```
-(venv) PS D:\AI> python ingest.py
+python ingest.py
 # Example output: Ingested 52 chunks into Chroma at ./chroma_db
 ```
 2. Run the Interactive CLI
 Start the interactive chat interface to generate code or ask general questions.
 ```python cli_chat.py```
+
