@@ -14,6 +14,7 @@ from tools import generate_tests, save_files, PERSIST_DIR, generate_chat_respons
 from ingest import create_embeddings 
 from langchain_core.documents import Document 
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, BaseMessage
+from langchain_core.messages import messages_from_dict, messages_to_dict
 
 load_dotenv()
 
@@ -49,9 +50,11 @@ def load_history() -> List[BaseMessage]:
     try:
         with open(HISTORY_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
-            history = [deserialize_message(d) for d in data]
-            print(f"Loaded {len(history)} messages from previous session.")
-            return history
+            return messages_from_dict(data)
+            # data = json.load(f)
+            # history = [deserialize_message(d) for d in data]
+            # print(f"Loaded {len(history)} messages from previous session.")
+            # return history
     except Exception as e:
         print(f"Warning: Failed to load chat history ({e}). Starting fresh.")
         return []
@@ -61,7 +64,7 @@ def save_history(history: List[BaseMessage]):
     try:
         serializable_history = [serialize_message(msg) for msg in history]
         with open(HISTORY_FILE, "w", encoding="utf-8") as f:
-            json.dump(serializable_history, f, indent=2)
+            json.dump(messages_to_dict(history), f)
     except Exception as e:
         print(f"Error: Failed to save chat history: {e}")
 
@@ -144,7 +147,7 @@ def process_request(user_request: str, retriever, history: List[BaseMessage]) ->
             
             # Note: We still pass the full messages_for_llm to `generate_tests` if that function is updated to use it
             # But the original generate_tests only accepts prompt_request, so we pass the context-rich human_text_for_tool
-            tests = generate_tests(human_text_for_tool, context) 
+            tests = generate_tests(user_request, context) 
             
             # Update history: append original request and AI summary
             ai_response_summary = f"Generated {len(tests)} script(s): " + ", ".join([t.filename for t in tests])
@@ -172,15 +175,28 @@ def process_request(user_request: str, retriever, history: List[BaseMessage]) ->
 
 def cli_loop():
     """The main interactive chat loop."""
-    print("--- CLI Code Generator AI Initialized ---")
+    
+    # Initialize components only once
     retriever = initialize_retriever()
-    
     conversation_history = load_history()
-    print(f"Total messages in history: {len(conversation_history)}")
     
-    print("Type your request. Use keywords like 'create script' or 'generate test' for code generation.")
-    print("----------------------------------------------------------------------------------------\n")
-    
+    # Import LLM_PROVIDER from tools for display
+    try:
+        from tools import LLM_PROVIDER
+    except ImportError:
+        LLM_PROVIDER = "unknown"
+        
+        # 1. Re-print status (now without history)
+        print("--- CLI Code Generator AI Initialized ---")
+        print(f"LLM Provider: {LLM_PROVIDER}") 
+        print(f"Total messages in history: {len(conversation_history)}")
+        
+        # The history printing block is gone here
+        
+        print("Type your request. Use keywords like 'create script' or 'generate test' for code generation.")
+        print("----------------------------------------------------------------------------------------\n")
+
+
     while True:
         try:
             user_input = input("Request > ").strip()
@@ -200,14 +216,13 @@ def cli_loop():
                 print("Processing failed. Please check logs and try again.")
                 continue
 
-            # Print results based on type
-            print("\n--- Model Output ---")
+            # This section prints the final, desired output after the processing
             if result["type"] == "chat":
-                # Print conversational response
-                print(result["response"])
+                # Print ONLY the conversational response, which should not include history now
+                print("AI > " + result["response"] + "\n")
                 
             elif result["type"] == "code":
-                # Print generated code
+                # ... (Existing code printing generated files)
                 generated_tests = result["tests"]
                 if not generated_tests:
                     print("Code generation failed or returned no scripts.")
@@ -228,7 +243,8 @@ def cli_loop():
                         else:
                             print(f"❌ Error saving files: {save_result.get('files')}")
 
-            print("--------------------\n")
+            # Note: The print("--------------------\n") at the end of the printing logic is kept here
+            # to separate the output from the next loop's clear screen operation.
 
         except KeyboardInterrupt:
             print("\nSaving conversation history...")

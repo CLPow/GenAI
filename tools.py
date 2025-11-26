@@ -8,8 +8,8 @@ import re
 from pathlib import Path
 from dotenv import load_dotenv
 from typing import List
-from pydantic import BaseModel as V1BaseModel
-from pydantic import Field
+from pydantic import BaseModel, Field
+from langchain_ollama import ChatOllama
 
 load_dotenv()
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "google").lower()
@@ -44,9 +44,19 @@ try:
 except Exception:
     ChatOpenAI = None
 
+Ollama = None
+try:
+    # Use the new dedicated Ollama package and alias it for existing code
+    from langchain_ollama import OllamaLLM as Ollama # type: ignore
+    from langchain_core.language_models import BaseChatModel, BaseLLM 
+except Exception:
+    Ollama = None
+    BaseChatModel = None
+    BaseLLM = None
+
 
 # Document model for generated tests
-class GeneratedTest(V1BaseModel):
+class GeneratedTest(BaseModel):
     filename: str = Field(description="The suggested filename for the test script (e.g., test_math.py).")
     language: str = Field(description="The primary programming language of the test (e.g., python).")
     framework: str = Field(description="The testing framework used (e.g., pytest, unittest, jest).")
@@ -55,40 +65,66 @@ class GeneratedTest(V1BaseModel):
     metadata: dict | None = Field(description="Optional extra metadata.", default=None)
 
 # Define the expected full output structure (a list of tests)
-class GeneratedTestList(V1BaseModel):
+class GeneratedTestList(BaseModel):
     tests: List[GeneratedTest] = Field(description="A JSON array containing 1 to 3 GeneratedTest objects.")
 
 PERSIST_DIR = os.getenv("CHROMA_PERSIST_DIR", "./chroma_db")
 
 
 def _make_chat_model(temperature: float = LLM_TEMP):
-    """Factory that returns a chat model instance."""
+    """Factory that returns a chat model instance (BaseChatModel or BaseLLM)."""
+
+    # 1. Ollama (LOCAL PROVIDER) - Add this block
+    if LLM_PROVIDER == "ollama":
+        if Ollama:
+            # Use the model name from your console output
+            return ChatOllama(model="gemma3:1b", temperature=temperature) 
+        else:
+            print("🛑 CRITICAL ERROR: LLM_PROVIDER is 'ollama', but Ollama library failed to import.")
+            
+    # 2. Google (CLOUD PROVIDER)
     if LLM_PROVIDER == "google" and ChatGoogleGenerativeAI:
         try:
             return ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=temperature)
         except Exception as e:
-            # THIS IS THE CRITICAL CHANGE: Print the actual error
             print(f"🛑 CRITICAL ERROR: Failed to initialize ChatGoogleGenerativeAI.")
             print(f"🛑 Reason: {e}")
             pass
+            
+    # 3. OpenAI (CLOUD PROVIDER)
     if ChatOpenAI:
         return ChatOpenAI(temperature=temperature, model_name=OPENAI_MODEL_NAME)
+        
     raise RuntimeError("No usable chat model found.")
-
 
 def generate_chat_response(messages: List[BaseMessage], temperature: float = 0.7) -> str:
     """
-    Generates a free-form text response using the chat model and conversation history.
-    Uses a higher temperature for conversational flow.
+    Generates a free-form text response using the model.
+    Handles both ChatModel (returns a Message object) and LLM (returns a string).
     """
     chat = _make_chat_model(temperature=temperature)
     
     try:
-        # Invoke the chat model directly with the full message history
-        response = chat.invoke(messages)
-        return response.content
-        
+        # 1. Check if the model is a ChatModel (like Gemini/OpenAI)
+        if isinstance(chat, BaseChatModel):
+            # ChatModels accept message objects and return a BaseMessage (which has .content)
+            response = chat.invoke(messages)
+            return response.content
+            
+        # 2. Check if the model is a standard LLM (like Ollama)
+        elif isinstance(chat, BaseLLM):
+            # LLMs require the messages to be compiled into a single string prompt
+            # We skip the system message for simple chat to avoid LLM formatting issues
+            prompt = "\n".join([f"{msg.type.capitalize()}: {msg.content}" for msg in messages if msg.type != 'system'])
+            # The invoke result for LLMs is the raw string output
+            response = chat.invoke(prompt) 
+            return response
+            
+        else:
+            raise TypeError("Model instance is not a recognized LangChain model type.")
+
     except Exception as e:
+        # Re-raise the error with context
         raise RuntimeError(f"Failed to generate chat response from model: {e}")
 
 
@@ -129,7 +165,8 @@ def save_files(tests: List[GeneratedTest], out_dir: str = "./generated_tests") -
     Path(out_dir).mkdir(parents=True, exist_ok=True)
     results = []
     for t in tests:
-        target = Path(out_dir) / t.filename
+        safe_filename = os.path.basename(t.filename)
+        target = Path(out_dir) / safe_filename
         target.parent.mkdir(parents=True, exist_ok=True)
         try:
             with open(target, "w", encoding="utf-8") as fh:
