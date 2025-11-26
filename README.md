@@ -8,11 +8,12 @@ Folder layout
 - ingest.py            # splits files into chunks and persists into a vector DB (Chroma by default)
 - tools.py             # tool wrappers: generate_tests_tool, save_tool, retrieval helpers
 - main.py              # example usage: query retriever + LLM to generate tests
+- cli_chat.py          # able to chat with AI like how GPT works
 - requirements.txt
 - .env.sample
 
 Quickstart
-1. Create a Python 3.10+ virtualenv and install requirements:
+1. Create a Python 3.11+ virtualenv and install requirements:
    python -m venv .venv
    source .venv/bin/activate
    pip install -r requirements.txt
@@ -26,8 +27,8 @@ Quickstart
 
    This creates/updates a local Chroma DB.
 
-5. Run generator:
-   python main.py
+5. Run and Chat with AI (The AI will remember last conversation):
+   python cli_chat.py
 
    The script loads retriever context and sends a generation request to the LLM. The generated test(s) will be printed and saved (by default, into ./generated_tests/).
 
@@ -37,7 +38,4 @@ Important notes
 - Embeddings: By default, the code uses OpenAI embeddings. You can swap in any embeddings provider supported by LangChain or Chroma.
 - Tuning: Use k=3..6 retrieved examples for best results; keep the LLM temperature low for deterministic code output.
 
-If you want, I can:
-- Adapt this to Gemini embeddings & chat generation specifically.
-- Add a runner tool that executes generated tests inside a Docker container and returns results (careful with security).
-- Add a web UI for uploading files and requesting generations.
+Tested with Gemini API key, will try with local LLM for Privacy.
