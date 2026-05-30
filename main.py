@@ -5,6 +5,7 @@ Example driver: query the vector store, call the generator, and save generated t
 Refactored to initialize Chroma with an embedding model and use the retriever interface.
 """
 import os
+from typing import List
 from dotenv import load_dotenv
 from tools import generate_tests, save_files, PERSIST_DIR
 from langchain_chroma import Chroma

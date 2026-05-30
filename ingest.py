@@ -14,32 +14,16 @@ from typing import List, Optional
 load_dotenv()
 
 # --- Imports for Document Loading ---
-from langchain_community.document_loaders import DirectoryLoader, TextLoader 
+from langchain_community.document_loaders import DirectoryLoader, TextLoader
 # --- Imports for Splitting and DB ---
 from langchain_text_splitters import RecursiveCharacterTextSplitter, Language
 from langchain_chroma import Chroma
-from langchain_core.documents import Document # Explicit Document class
-
-# --- Imports for Embeddings ---
-try:
-    from langchain_community.embeddings import VertexAIEmbeddings  # type: ignore
-except Exception:
-    VertexAIEmbeddings = None
-
-from langchain_community.embeddings import HuggingFaceEmbeddings
-try:
-    from langchain_community.embeddings import OpenAIEmbeddings  # optional
-except Exception:
-    OpenAIEmbeddings = None
-try:
-    from langchain_community.embeddings import OllamaEmbeddings
-except Exception:
-    OllamaEmbeddings = None
-
+from langchain_core.documents import Document  # Explicit Document class
 
 DEFAULT_DATA_DIR = os.getenv("DATA_DIR", "./data")
 DEFAULT_PERSIST_DIR = os.getenv("CHROMA_PERSIST_DIR", "./chroma_db")
-LLM_PROVIDER = os.getenv("LLM_PROVIDER", "").lower()
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "google").strip().lower()
+HF_EMBEDDING_MODEL = os.getenv("HF_EMBEDDING_MODEL", "all-MiniLM-L6-v2")
 OLLAMA_EMBEDDING_MODEL = os.getenv("OLLAMA_EMBEDDING_MODEL", "mxbai-embed-large")
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 
@@ -57,42 +41,61 @@ EXTENSION_MAP = {
     ".txt": Language.PYTHON, # Assumption: .txt usually contains Python in your workflow
 }
 
-def create_embeddings():
-    """Factory that returns an embedding model instance."""
-    if LLM_PROVIDER == "google" and VertexAIEmbeddings and os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
-        try:
-            print("Using VertexAIEmbeddings.")
-            return VertexAIEmbeddings()
-        except Exception as e:
-            print("VertexAIEmbeddings instantiation failed:", e)
-            print("Falling back to HuggingFaceEmbeddings.")
+def _huggingface_embeddings():
+    """Local, zero-key fallback embeddings. Imported lazily."""
+    try:
+        from langchain_huggingface import HuggingFaceEmbeddings  # current package
+    except ImportError:
+        # Older installs still expose it under community.
+        from langchain_community.embeddings import HuggingFaceEmbeddings  # type: ignore
+    print(f"Using HuggingFaceEmbeddings (local): {HF_EMBEDDING_MODEL}")
+    return HuggingFaceEmbeddings(model_name=HF_EMBEDDING_MODEL)
 
-    if os.getenv("OPENAI_API_KEY") and OpenAIEmbeddings is not None:
+
+def create_embeddings():
+    """Return an embedding model that matches the configured provider.
+
+    IMPORTANT: the same embedding model must be used for both ingest and query,
+    otherwise vector dimensions won't match. Keep LLM_PROVIDER consistent across
+    `ingest.py` and the chat/driver runs.
+
+    - ollama  -> local OllamaEmbeddings (zero keys)
+    - openai  -> OpenAIEmbeddings (needs OPENAI_API_KEY)
+    - google  -> GoogleGenerativeAIEmbeddings (needs GOOGLE_API_KEY)
+    - anything else / missing deps -> local HuggingFace fallback (zero keys)
+    """
+    # --- LOCAL: Ollama (no key) ---
+    if LLM_PROVIDER == "ollama":
         try:
+            from langchain_ollama import OllamaEmbeddings
+            print(f"Using OllamaEmbeddings (local): {OLLAMA_EMBEDDING_MODEL}")
+            return OllamaEmbeddings(model=OLLAMA_EMBEDDING_MODEL, base_url=OLLAMA_BASE_URL)
+        except Exception as e:
+            print(f"OllamaEmbeddings unavailable ({e}). Falling back to local HuggingFace.")
+            return _huggingface_embeddings()
+
+    # --- CLOUD: OpenAI ---
+    if LLM_PROVIDER == "openai" and os.getenv("OPENAI_API_KEY"):
+        try:
+            from langchain_openai import OpenAIEmbeddings
             print("Using OpenAIEmbeddings.")
             return OpenAIEmbeddings()
-        except Exception:
-            pass
-
-    # NEW: Ollama Check (for local RAG consistency)
-    if LLM_PROVIDER == "ollama" and OllamaEmbeddings is not None:
-        try:
-            print(f"Using OllamaEmbeddings with model: {OLLAMA_EMBEDDING_MODEL}")
-            # Ensure the model is pulled in Ollama (e.g., ollama pull mxbai-embed-large)
-            return OllamaEmbeddings(
-                model=OLLAMA_EMBEDDING_MODEL,
-                base_url=OLLAMA_BASE_URL
-            )
         except Exception as e:
-            print(f"OllamaEmbeddings instantiation failed: {e}")
-            print("Falling back to HuggingFaceEmbeddings.")
+            print(f"OpenAIEmbeddings unavailable ({e}). Falling back to local HuggingFace.")
+            return _huggingface_embeddings()
 
-    # Fallback: local HuggingFace embeddings
-    try:
-        print("Using HuggingFaceEmbeddings.")
-        return HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-    except Exception as e:
-        raise RuntimeError(f"Failed to instantiate HuggingFaceEmbeddings: {e}")
+    # --- CLOUD: Google (Gemini API key, matches the chat provider) ---
+    if LLM_PROVIDER == "google" and os.getenv("GOOGLE_API_KEY"):
+        try:
+            from langchain_google_genai import GoogleGenerativeAIEmbeddings
+            print("Using GoogleGenerativeAIEmbeddings.")
+            return GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
+        except Exception as e:
+            print(f"GoogleGenerativeAIEmbeddings unavailable ({e}). Falling back to local HuggingFace.")
+            return _huggingface_embeddings()
+
+    # --- LOCAL fallback (no key) ---
+    return _huggingface_embeddings()
 
 def get_splitter_for_file(filename: str, chunk_size: int, chunk_overlap: int):
     """Returns a text splitter optimized for the file's language."""

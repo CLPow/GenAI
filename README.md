@@ -32,40 +32,78 @@ python -m venv venv
 # source venv/bin/activate
 ```
 2. Install Dependencies
-Install all required Python packages:
+Install the core packages (always required):
 ```
-pip install -U python-dotenv pydantic langchain-core langchain-community langchain-chroma langchain-text-splitters langchain-google-genai sentence-transformers
+pip install -U python-dotenv pydantic langchain-core langchain-community langchain-chroma langchain-text-splitters langchain-huggingface sentence-transformers
 ```
 
-3. Configure API Keys
-Create a file named .env in the root directory and set your API keys and provider preference.
+Then install ONLY the provider packages you intend to use. SDKs are imported
+lazily per-provider, so a missing one never breaks the others:
+```
+# Google Gemini (cloud)
+pip install -U langchain-google-genai
+
+# OpenAI (cloud)
+pip install -U langchain-openai
+
+# Ollama (local, no API key required)
+pip install -U langchain-ollama
+```
+
+3. Configure Provider and Keys
+Create a file named .env in the root directory. `LLM_PROVIDER` is the single
+switch that decides which backend runs. The chosen provider is the only one
+attempted — there is no silent fallback to a different cloud provider. The same
+provider is used for both generation and the RAG embeddings, so keep it
+consistent between `ingest.py` and `cli_chat.py` runs (changing the embedding
+model after ingest will break vector lookups).
 ```
 # --- LLM Provider Selection ---
-# To use Google, set: LLM_PROVIDER=google
-# To use Ollama (local), set: LLM_PROVIDER=ollama
-# To use OpenAI, set: LLM_PROVIDER=openai
+# google | openai (cloud)  |  ollama (local, no key)
 LLM_PROVIDER=google
 
-# --- Google Gemini Configuration ---
-GOOGLE_API_KEY=YOUR_GEMINI_API_KEY_HERE
-# GOOGLE_MODEL_NAME=gemini-2.5-flash (Optional override, defaults to this)
+# Optional global generation temperature (default 0.0)
+# LLM_TEMPERATURE=0.0
 
-# --- OpenAI Configuration (Uncomment to use) ---
+# --- Google Gemini Configuration (LLM_PROVIDER=google) ---
+GOOGLE_API_KEY=YOUR_GEMINI_API_KEY_HERE
+# GOOGLE_MODEL_NAME=gemini-2.5-flash   # optional override
+
+# --- OpenAI Configuration (LLM_PROVIDER=openai) ---
 # OPENAI_API_KEY=YOUR_OPENAI_API_KEY_HERE
-# OPENAI_MODEL_NAME=gpt-4o-mini (Optional override)
+# OPENAI_MODEL_NAME=gpt-4o-mini        # optional override
+
+# --- Ollama / Local Configuration (LLM_PROVIDER=ollama, no key needed) ---
+# OLLAMA_MODEL_NAME=gemma3:1b                 # chat model (default)
+# OLLAMA_EMBEDDING_MODEL=mxbai-embed-large    # embedding model (default)
+# OLLAMA_BASE_URL=http://localhost:11434      # Ollama server URL (default)
+
+# --- Embeddings fallback (local, no key) ---
+# Used when no provider key is available. Must match between ingest and query.
+# HF_EMBEDDING_MODEL=all-MiniLM-L6-v2
 
 # --- Vector Store Configuration ---
 CHROMA_PERSIST_DIR=./chroma_db
 ```
 
+🔐 A note on secrets: keys are read only from the environment / `.env` (which is
+git-ignored). The app never prints key values. Cloud providers fail fast with a
+clear message if their key is missing — switch to `LLM_PROVIDER=ollama` to run
+fully local with no keys at all.
+
 🌐 Switching to Local LLMs (Ollama)
-To run a Llama model locally, follow these steps:
+To run fully local with zero API keys:
 1. Install Ollama: Download and install the Ollama application for your OS.
-2. Download Model: Download a model like Llama 3 from your command line:
-   ```ollama pull llama3```
-3. Update .env: Change the provider setting in your .env file:
+2. Pull a chat model and an embedding model:
+   ```
+   ollama pull gemma3:1b
+   ollama pull mxbai-embed-large
+   ```
+   (Override the defaults with `OLLAMA_MODEL_NAME` / `OLLAMA_EMBEDDING_MODEL` if you prefer other models, e.g. `ollama pull llama3`.)
+3. Set the provider in your .env:
    ```LLM_PROVIDER=ollama```
-The application will automatically use the llama3 model served by your local Ollama instance.
+4. Re-run `python ingest.py` so the vector store is built with the Ollama
+   embeddings (embeddings must match between ingest and query).
 __________________________________________________________________________________________________________________
 
 🏃 How to Run

@@ -7,7 +7,7 @@ import os
 import sys
 import json
 from dotenv import load_dotenv
-from typing import List, Optional, Dict, Any
+from typing import List, Dict, Any
 from langchain_chroma import Chroma
 # IMPORT THE NEW FUNCTION:
 from tools import generate_tests, save_files, PERSIST_DIR, generate_chat_response 
@@ -19,30 +19,11 @@ from langchain_core.messages import messages_from_dict, messages_to_dict
 load_dotenv()
 
 # Configuration
-K_VALUE = 4 
-HISTORY_FILE = os.getenv("HISTORY_FILE", "chat_history.json") 
+K_VALUE = 4
+HISTORY_FILE = os.getenv("HISTORY_FILE", "chat_history.json")
 
 
-# --- Helper Functions (Same as before) ---
-def serialize_message(message: BaseMessage) -> Dict[str, Any]:
-    """Converts a LangChain BaseMessage object to a serializable dictionary."""
-    return {
-        "type": message.type,
-        "content": message.content,
-        "example": getattr(message, "example", False), # Ensure 'example' is handled safely
-    }
-
-def deserialize_message(data: Dict[str, Any]) -> BaseMessage:
-    """Converts a serialized dictionary back to a LangChain BaseMessage object."""
-    msg_type = data.get("type", "human")
-    content = data.get("content", "")
-    
-    if msg_type == "system":
-        return SystemMessage(content=content)
-    elif msg_type == "ai":
-        return AIMessage(content=content)
-    return HumanMessage(content=content)
-
+# --- Helper Functions ---
 def load_history() -> List[BaseMessage]:
     """Loads message history from the history file."""
     if not os.path.exists(HISTORY_FILE):
@@ -51,10 +32,6 @@ def load_history() -> List[BaseMessage]:
         with open(HISTORY_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
             return messages_from_dict(data)
-            # data = json.load(f)
-            # history = [deserialize_message(d) for d in data]
-            # print(f"Loaded {len(history)} messages from previous session.")
-            # return history
     except Exception as e:
         print(f"Warning: Failed to load chat history ({e}). Starting fresh.")
         return []
@@ -62,7 +39,6 @@ def load_history() -> List[BaseMessage]:
 def save_history(history: List[BaseMessage]):
     """Saves the current message history to the history file."""
     try:
-        serializable_history = [serialize_message(msg) for msg in history]
         with open(HISTORY_FILE, "w", encoding="utf-8") as f:
             json.dump(messages_to_dict(history), f)
     except Exception as e:
@@ -185,17 +161,13 @@ def cli_loop():
         from tools import LLM_PROVIDER
     except ImportError:
         LLM_PROVIDER = "unknown"
-        
-        # 1. Re-print status (now without history)
-        print("--- CLI Code Generator AI Initialized ---")
-        print(f"LLM Provider: {LLM_PROVIDER}") 
-        print(f"Total messages in history: {len(conversation_history)}")
-        
-        # The history printing block is gone here
-        
-        print("Type your request. Use keywords like 'create script' or 'generate test' for code generation.")
-        print("----------------------------------------------------------------------------------------\n")
 
+    # Print startup banner (runs regardless of import outcome)
+    print("--- CLI Code Generator AI Initialized ---")
+    print(f"LLM Provider: {LLM_PROVIDER}")
+    print(f"Total messages in history: {len(conversation_history)}")
+    print("Type your request. Use keywords like 'create script' or 'generate test' for code generation.")
+    print("----------------------------------------------------------------------------------------\n")
 
     while True:
         try:
