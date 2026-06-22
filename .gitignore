@@ -1,0 +1,27 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# --- Virtual environments ---
+.venv/
+venv/
+env/
+
+# --- Secrets / environment ---
+# Never commit real keys. Commit a .env.example instead.
+.env
+.env.*
+!.env.example
+
+# --- Runtime artifacts ---
+chroma_db/
+generated_tests/
+chat_history.json
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

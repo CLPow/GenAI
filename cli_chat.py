@@ -1,233 +1,248 @@
 #!/usr/bin/env python3
 """
-Interactive CLI Chat AI for code generation using RAG and Persistent Memory.
-Now supports both general chat and structured code generation.
+Interactive CLI for a multipurpose RAG assistant.
+
+The assistant's role is NOT preset by the app -- it is driven by a user-defined
+system prompt (env SYSTEM_PROMPT / SYSTEM_PROMPT_FILE, or the /system command at
+runtime). Point it at any ingested dataset and it becomes whatever you ask for:
+an internal wiki, an information desk, a data analyst, a code writer, etc.
+
+Every request is answered with RAG: relevant chunks are retrieved from the
+vector store and given to the model as grounding CONTEXT. Conversation memory is
+durable, model-agnostic, and self-compacting (see memory.py). Structured
+code/file generation is available on demand via the /code command.
+
+Safety: retrieved context is treated as untrusted data, never as instructions;
+input length and generated-file size are capped.
 """
 import os
 import sys
-import json
 from dotenv import load_dotenv
-from typing import List, Dict, Any
+from typing import List
 from langchain_chroma import Chroma
-# IMPORT THE NEW FUNCTION:
-from tools import generate_tests, save_files, PERSIST_DIR, generate_chat_response 
-from ingest import create_embeddings 
-from langchain_core.documents import Document 
-from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, BaseMessage
-from langchain_core.messages import messages_from_dict, messages_to_dict
+from tools import (
+    generate_tests,
+    save_files,
+    PERSIST_DIR,
+    generate_chat_response,
+    load_system_prompt,
+    summarize_text,
+    CONTEXT_SECURITY_GUARD,
+)
+from memory import ConversationMemory
+from ingest import create_embeddings
+from langchain_core.documents import Document
+from langchain_core.messages import SystemMessage, HumanMessage
 
 load_dotenv()
 
 # Configuration
-K_VALUE = 4
+K_VALUE = int(os.getenv("RAG_K", "4"))
 HISTORY_FILE = os.getenv("HISTORY_FILE", "chat_history.json")
+MEMORY_MAX_MESSAGES = int(os.getenv("MEMORY_MAX_MESSAGES", "20"))
+MEMORY_KEEP_RECENT = int(os.getenv("MEMORY_KEEP_RECENT", "8"))
+MAX_INPUT_CHARS = int(os.getenv("MAX_INPUT_CHARS", "8000"))
 
-
-# --- Helper Functions ---
-def load_history() -> List[BaseMessage]:
-    """Loads message history from the history file."""
-    if not os.path.exists(HISTORY_FILE):
-        return []
-    try:
-        with open(HISTORY_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            return messages_from_dict(data)
-    except Exception as e:
-        print(f"Warning: Failed to load chat history ({e}). Starting fresh.")
-        return []
-
-def save_history(history: List[BaseMessage]):
-    """Saves the current message history to the history file."""
-    try:
-        with open(HISTORY_FILE, "w", encoding="utf-8") as f:
-            json.dump(messages_to_dict(history), f)
-    except Exception as e:
-        print(f"Error: Failed to save chat history: {e}")
 
 def initialize_retriever():
     """Initializes and returns the Chroma VectorStoreRetriever."""
-    # ... (same as before) ...
     try:
         print("Initializing embeddings and vector database...")
-        embeddings = create_embeddings() 
+        embeddings = create_embeddings()
         vectordb = Chroma(persist_directory=PERSIST_DIR, embedding_function=embeddings)
         retriever = vectordb.as_retriever(search_kwargs={"k": K_VALUE})
         print(f"Retriever initialized. Will search for top {K_VALUE} context chunks.")
         return retriever
-        
     except Exception as e:
-        print(f"Error initializing vector store. Have you run 'python ingest.py' yet?")
+        print("Error initializing vector store. Have you run 'python ingest.py' yet?")
         print(f"Details: {e}")
         sys.exit(1)
 
 
-# --- New Helper Function ---
-
-def is_code_generation_request(request: str) -> bool:
-    """Simple check to determine if the request is for code generation."""
-    request_lower = request.lower()
-    # Define keywords that trigger the structured code generation path
-    keywords = ["create", "generate", "write", "code", "script", "test file", "testscript", "function", "class", "module"]
-    return any(k in request_lower for k in keywords)
-
-
-# --- Core Processing Function (Modified) ---
-
-def process_request(user_request: str, retriever, history: List[BaseMessage]) -> Dict[str, Any]:
-    """Routes the request to either structured code generation or general chat."""
-    
-    is_code_request = is_code_generation_request(user_request)
-
-    # 1. Setup System Message based on request type
-    if is_code_request:
-        # System message for structured output (code generation)
-        system_text = (
-            "You are an assistant that writes runnable test scripts. Your task is to ONLY return a JSON object that strictly adheres to the provided schema. "
-            "Use the CONTEXT EXAMPLES for style and structure. DO NOT respond with conversational text."
-        )
-    else:
-        # System message for general conversation
-        system_text = (
-            "You are a helpful and friendly code assistant. Answer the user's general questions conversationally, drawing on memory where relevant. "
-            "If the user asks you to generate code, politely ask them to include keywords like 'create script' or 'generate test' so you can use your specialized code generation tool."
-        )
-
-    # 2. Handle Retrieval (Only relevant for code generation)
+def retrieve_context(retriever, query: str) -> List[str]:
+    """Return retrieved chunks formatted with their source filename."""
+    docs: List[Document] = retriever.invoke(query)
     context = []
-    if is_code_request:
-        print(f"\n🧠 Retrieving context for code request: '{user_request[:50]}...'")
-        docs: List[Document] = retriever.invoke(user_request) 
-        for d in docs:
-            meta = d.metadata
-            filename = meta.get("filename", meta.get("source", "unknown"))
-            piece = f"File: {filename}\n{d.page_content}"
-            context.append(piece)
-        print(f"Retrieved {len(context)} examples for style guidance.")
+    for d in docs:
+        meta = d.metadata
+        filename = meta.get("filename", meta.get("source", "unknown"))
+        context.append(f"File: {filename}\n{d.page_content}")
+    return context
 
-    # 3. Construct Messages List
-    new_human_message = HumanMessage(content=user_request)
-    messages_for_llm = [SystemMessage(content=system_text)] + history + [new_human_message]
 
-    try:
-        if is_code_request:
-            # --- CODE GENERATION PATH ---
-            print("✨ Generating structured script with LLM...")
-            
-            # The prompt includes the context for RAG
-            context_prompt = "\n\n---\n\n".join(context) if context else "No examples provided."
-            human_text_for_tool = (
-                f"CONTEXT EXAMPLES (style hints):\n{context_prompt}\n\n"
-                f"USER REQUEST:\n{user_request}\n\n"
-                "Return only a JSON object that matches the schema. Generate 1 to 3 tests as needed."
-            )
-            
-            # Note: We still pass the full messages_for_llm to `generate_tests` if that function is updated to use it
-            # But the original generate_tests only accepts prompt_request, so we pass the context-rich human_text_for_tool
-            tests = generate_tests(user_request, context) 
-            
-            # Update history: append original request and AI summary
-            ai_response_summary = f"Generated {len(tests)} script(s): " + ", ".join([t.filename for t in tests])
-            history.append(new_human_message)
-            history.append(AIMessage(content=ai_response_summary))
-            
-            return {"type": "code", "tests": tests}
-        
+def _build_system_message(system_prompt: str, memory: ConversationMemory) -> SystemMessage:
+    """Compose ONE system message: persona + always-on safety guard + (optional)
+    rolling memory summary. Keeping it to a single system message maximizes
+    cross-provider compatibility.
+    """
+    parts = [system_prompt.strip(), CONTEXT_SECURITY_GUARD]
+    summary = memory.summary_block()
+    if summary:
+        parts.append(summary)
+    return SystemMessage(content="\n\n".join(parts))
+
+
+def answer_question(user_request: str, retriever, memory: ConversationMemory,
+                    system_prompt: str) -> str:
+    """General RAG answer: retrieve grounding context, answer in the user's role."""
+    print(f"\n🧠 Retrieving context for: '{user_request[:60]}...'")
+    context = retrieve_context(retriever, user_request)
+    print(f"Retrieved {len(context)} context chunk(s).")
+
+    context_block = "\n\n---\n\n".join(context) if context else (
+        "No relevant context was found in the knowledge base."
+    )
+    human_text = (
+        "=== BEGIN CONTEXT (untrusted data) ===\n"
+        f"{context_block}\n"
+        "=== END CONTEXT ===\n\n"
+        f"QUESTION:\n{user_request}"
+    )
+
+    messages = (
+        [_build_system_message(system_prompt, memory)]
+        + memory.recent_messages()
+        + [HumanMessage(content=human_text)]
+    )
+    print("💬 Generating response...")
+    response = generate_chat_response(messages)
+
+    # Persist the clean question (not the context-stuffed prompt) to keep memory lean.
+    memory.add_user(user_request)
+    memory.add_ai(response)
+    if memory.compact_if_needed():
+        print("🧷 (older turns folded into the running summary)")
+    memory.save()  # durable after every turn
+    return response
+
+
+def generate_code(user_request: str, retriever, memory: ConversationMemory,
+                  system_prompt: str):
+    """Structured file/code generation, grounded in retrieved examples."""
+    print(f"\n🧠 Retrieving examples for: '{user_request[:60]}...'")
+    context = retrieve_context(retriever, user_request)
+    print(f"Retrieved {len(context)} example(s) for style guidance.")
+    print("✨ Generating structured output with LLM...")
+
+    tests = generate_tests(user_request, context, system_prompt=system_prompt)
+    summary = f"Generated {len(tests)} file(s): " + ", ".join(t.filename for t in tests)
+    memory.add_user(f"/code {user_request}")
+    memory.add_ai(summary)
+    memory.compact_if_needed()
+    memory.save()
+    return tests
+
+
+def print_and_offer_save(tests):
+    """Render generated files and optionally write them to disk."""
+    if not tests:
+        print("Generation returned no files.")
+        return
+    for t in tests:
+        print(f"\n**Filename:** {t.filename}")
+        print(f"**Description:** {t.description}")
+        lang = getattr(t, "language", "") or ""
+        print(f"\n```{lang}")
+        print(t.content)
+        print("```\n")
+
+    if input("Save generated files? (y/n) [n]: ").strip().lower() == "y":
+        result = save_files(tests)
+        if result.get("ok"):
+            print("✅ Saved files to ./generated_tests/")
         else:
-            # --- CHAT / CONVERSATION PATH ---
-            print("💬 Generating conversational response...")
-            
-            chat_response = generate_chat_response(messages_for_llm)
-            
-            # Update history: append original request and AI response
-            history.append(new_human_message)
-            history.append(AIMessage(content=chat_response))
-            
-            return {"type": "chat", "response": chat_response}
-        
-    except Exception as e:
-        print(f"Error during processing: {e}")
-        return {"type": "error"}
+            print(f"❌ Error saving files: {result.get('files')}")
+
+
+def print_help(system_prompt: str):
+    print("\nCommands:")
+    print("  <anything>        Ask a question (answered from your ingested data)")
+    print("  /code <request>   Generate structured code/files for <request>")
+    print("  /system           Show the current system prompt (the assistant's role)")
+    print("  /system <text>    Set a new system prompt for this session")
+    print("  /reset            Clear the conversation memory")
+    print("  /help             Show this help")
+    print("  quit | exit       Save memory and leave")
+    print(f"\nActive role: {system_prompt[:120]}{'...' if len(system_prompt) > 120 else ''}\n")
 
 
 def cli_loop():
-    """The main interactive chat loop."""
-    
-    # Initialize components only once
+    """The main interactive loop."""
     retriever = initialize_retriever()
-    conversation_history = load_history()
-    
-    # Import LLM_PROVIDER from tools for display
+    system_prompt = load_system_prompt()
+    memory = ConversationMemory(
+        HISTORY_FILE,
+        max_messages=MEMORY_MAX_MESSAGES,
+        keep_recent=MEMORY_KEEP_RECENT,
+        summarizer=summarize_text,
+    ).load()
+
     try:
         from tools import LLM_PROVIDER
     except ImportError:
         LLM_PROVIDER = "unknown"
 
-    # Print startup banner (runs regardless of import outcome)
-    print("--- CLI Code Generator AI Initialized ---")
+    print("\n--- Multipurpose RAG Assistant ---")
     print(f"LLM Provider: {LLM_PROVIDER}")
-    print(f"Total messages in history: {len(conversation_history)}")
-    print("Type your request. Use keywords like 'create script' or 'generate test' for code generation.")
-    print("----------------------------------------------------------------------------------------\n")
+    print(f"Recent messages in memory: {len(memory.messages)}"
+          + (" (+ running summary)" if memory.summary else ""))
+    print(f"Active role: {system_prompt[:120]}{'...' if len(system_prompt) > 120 else ''}")
+    print("Type /help for commands. Set the assistant's role with /system <text>.")
+    print("-" * 60 + "\n")
 
     while True:
         try:
             user_input = input("Request > ").strip()
-            
             if not user_input:
                 continue
-            
-            if user_input.lower() in ["quit", "exit"]:
-                print("\nSaving conversation history...")
-                save_history(conversation_history) 
-                print("Goodbye!")
+            if len(user_input) > MAX_INPUT_CHARS:
+                print(f"⚠️  Input over {MAX_INPUT_CHARS} chars; truncating.")
+                user_input = user_input[:MAX_INPUT_CHARS]
+
+            low = user_input.lower()
+
+            # --- Commands ---
+            if low in ("quit", "exit"):
                 break
-            
-            result = process_request(user_input, retriever, conversation_history)
-            
-            if result["type"] == "error":
-                print("Processing failed. Please check logs and try again.")
+            if low in ("/help", "help", "?"):
+                print_help(system_prompt)
+                continue
+            if low == "/system":
+                print(f"\nCurrent system prompt:\n{system_prompt}\n")
+                continue
+            if low.startswith("/system "):
+                system_prompt = user_input[len("/system "):].strip()
+                print("✅ System prompt updated for this session.\n")
+                continue
+            if low == "/reset":
+                memory.clear()
+                print("🧹 Conversation memory cleared.\n")
+                continue
+            if low == "/code" or low.startswith("/code "):
+                request = user_input[len("/code"):].strip()
+                if not request:
+                    print("Usage: /code <what to build>\n")
+                    continue
+                try:
+                    tests = generate_code(request, retriever, memory, system_prompt)
+                    print_and_offer_save(tests)
+                except Exception as e:
+                    print(f"Error during code generation: {e}\n")
                 continue
 
-            # This section prints the final, desired output after the processing
-            if result["type"] == "chat":
-                # Print ONLY the conversational response, which should not include history now
-                print("AI > " + result["response"] + "\n")
-                
-            elif result["type"] == "code":
-                # ... (Existing code printing generated files)
-                generated_tests = result["tests"]
-                if not generated_tests:
-                    print("Code generation failed or returned no scripts.")
-                else:
-                    for t in generated_tests:
-                        print(f"**Filename:** {t.filename}")
-                        print(f"**Description:** {t.description}")
-                        print("\n```python")
-                        print(t.content)
-                        print("```\n")
-                        
-                    # Offer to save the files (only for code)
-                    save_choice = input("Save generated files? (y/n) [n]: ").lower()
-                    if save_choice == 'y':
-                        save_result = save_files(generated_tests)
-                        if save_result.get('ok'):
-                            print(f"✅ Successfully saved files to ./generated_tests/")
-                        else:
-                            print(f"❌ Error saving files: {save_result.get('files')}")
+            # --- Default: general RAG answer ---
+            try:
+                response = answer_question(user_input, retriever, memory, system_prompt)
+                print("\nAI > " + response + "\n")
+            except Exception as e:
+                print(f"Error during processing: {e}\n")
 
-            # Note: The print("--------------------\n") at the end of the printing logic is kept here
-            # to separate the output from the next loop's clear screen operation.
+        except (KeyboardInterrupt, EOFError):
+            break
 
-        except KeyboardInterrupt:
-            print("\nSaving conversation history...")
-            save_history(conversation_history) 
-            print("Goodbye!")
-            break
-        except EOFError:
-            print("\nSaving conversation history...")
-            save_history(conversation_history) 
-            print("Goodbye!")
-            break
+    # Memory is already saved after each turn; this is just a final safety net.
+    memory.save()
+    print("\nGoodbye!")
 
 
 if __name__ == "__main__":

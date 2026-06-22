@@ -1,0 +1,30 @@
+# Core (always required) -- needs Python 3.11+ (LangChain 0.2+ / Pydantic v2)
+python-dotenv>=1.0
+pydantic>=2.0
+langchain-core>=0.2
+langchain-community>=0.2
+langchain-chroma>=0.1
+langchain-text-splitters>=0.2
+langchain-huggingface>=0.0.3
+sentence-transformers>=2.2
+
+# Used by csv_ingest.py and Excel ingestion
+pandas>=2.0
+
+# --- Optional ingestion formats: install only what you need ---
+# Loaders import these lazily, so a missing one disables just that file type.
+# pypdf>=4.0          # PDF (.pdf)
+# docx2txt>=0.8       # Word (.docx)
+# openpyxl>=3.1       # Excel (.xlsx)   (xlrd>=2.0 for legacy .xls)
+# python-pptx>=0.6    # PowerPoint (.pptx)
+# pytesseract>=0.3    # Image OCR -- also requires the Tesseract engine on your system
+# Pillow>=10.0        # Image OCR (image decoding)
+
+# --- Optional LLM providers: install only the one(s) you use ---
+# SDKs are imported lazily per-provider, so a missing one never breaks the rest.
+# Google Gemini (cloud):
+# langchain-google-genai>=1.0
+# OpenAI (cloud):
+# langchain-openai>=0.1
+# Ollama (local, no API key):
+# langchain-ollama>=0.1

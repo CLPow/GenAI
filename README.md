@@ -1,13 +1,15 @@
-# 📄 Project Readme: RAG Code Generator AI
+# 📄 Project Readme: Multipurpose RAG GenAI System
 
 🎯 Overview
-This project is an Retrieval-Augmented Generation (RAG) system designed to automatically generate high-quality unit tests based on your existing codebase style and specific user requests. It uses a Chroma vector database for retrieval and supports a variety of Large Language Models (LLMs) for generation, including Google Gemini, OpenAI, and local models via Ollama.
+This project is a general-purpose Retrieval-Augmented Generation (RAG) system. It answers and generates **grounded in whatever dataset you ingest** — code, docs, CSVs, notes, anything — and its behavior is shaped entirely by a **user-defined system prompt**. Set that prompt and the same app becomes an internal wiki, an information desk, a data analyst, a code writer, or a Q&A bot. It uses a Chroma vector database for retrieval and supports Google Gemini, OpenAI, and local models via Ollama.
 
 Key Features:
 
-Context-Aware Generation: Uses RAG to retrieve examples from your codebase's style guide and existing tests.
+You Define the Purpose: The assistant's role is never hard-coded. Set it via `SYSTEM_PROMPT` / `SYSTEM_PROMPT_FILE`, or change it live with the `/system` command.
 
-Structured Output: Generates tests as clean, parsed JSON objects defined by Pydantic models.
+Grounded Answers: Every query retrieves relevant chunks from your knowledge base and answers from that CONTEXT.
+
+On-Demand Code Generation: The `/code` command produces structured, runnable files (parsed into Pydantic models) when you want artifacts instead of prose.
 
 Flexible Deployment: Easily switch between cloud APIs and local LLMs.
 __________________________________________________________________________________________________________________
@@ -19,7 +21,7 @@ This project requires Python 3.11 or higher due to modern dependency requirement
 ```
 # Clone the repository
 git clone https://github.com/CLPow/GenAI.git
-cd your-repo-name
+cd GenAI
 
 # Create a new virtual environment (Requires Python 3.11+ to be installed)
 # Use 'py -3.11 -m venv venv' if 'python' defaults to an older version.
@@ -32,13 +34,20 @@ python -m venv venv
 # source venv/bin/activate
 ```
 2. Install Dependencies
-Install the core packages (always required):
+The quickest path is the pinned manifest, which installs the core packages plus
+`pandas` (used by `csv_ingest.py`):
+```
+pip install -U -r requirements.txt
+```
+
+Or install the core packages by hand (always required):
 ```
 pip install -U python-dotenv pydantic langchain-core langchain-community langchain-chroma langchain-text-splitters langchain-huggingface sentence-transformers
 ```
 
-Then install ONLY the provider packages you intend to use. SDKs are imported
-lazily per-provider, so a missing one never breaks the others:
+Either way, install ONLY the provider packages you intend to use. SDKs are
+imported lazily per-provider, so a missing one never breaks the others (the
+provider lines in `requirements.txt` are commented out for the same reason):
 ```
 # Google Gemini (cloud)
 pip install -U langchain-google-genai
@@ -51,7 +60,12 @@ pip install -U langchain-ollama
 ```
 
 3. Configure Provider and Keys
-Create a file named .env in the root directory. `LLM_PROVIDER` is the single
+Copy the template to a real `.env` (which is git-ignored), then edit it:
+```
+# Windows (PowerShell): copy .env.example .env
+# Linux/macOS:          cp .env.example .env
+```
+`LLM_PROVIDER` is the single
 switch that decides which backend runs. The chosen provider is the only one
 attempted — there is no silent fallback to a different cloud provider. The same
 provider is used for both generation and the RAG embeddings, so keep it
@@ -64,6 +78,12 @@ LLM_PROVIDER=google
 
 # Optional global generation temperature (default 0.0)
 # LLM_TEMPERATURE=0.0
+
+# --- Assistant role (the "purpose") -- you define it ---
+# Precedence: SYSTEM_PROMPT_FILE > SYSTEM_PROMPT > built-in generic default.
+# SYSTEM_PROMPT=You are an internal company wiki. Answer strictly from CONTEXT and cite the source File.
+# SYSTEM_PROMPT_FILE=./system_prompt.txt
+# RAG_K=4   # number of context chunks retrieved per query (default 4)
 
 # --- Google Gemini Configuration (LLM_PROVIDER=google) ---
 GOOGLE_API_KEY=YOUR_GEMINI_API_KEY_HERE
@@ -107,13 +127,101 @@ To run fully local with zero API keys:
 __________________________________________________________________________________________________________________
 
 🏃 How to Run
-1. Ingest Data (First Time Only)
-Ingest your test scripts or style examples (in plain text format) into the vector database. This powers the RAG retrieval.
+1. Ingest Your Data (First Time Only)
+Drop your knowledge base into `./data` (override with `DATA_DIR`) and ingest it.
+`ingest.py` walks the folder, sends each file to a format-specific loader, and
+chunks the extracted text with language-aware splitting.
+
+Supported inputs:
+| Category            | Extensions                                                        | Optional dependency |
+|---------------------|-------------------------------------------------------------------|---------------------|
+| Text / code / data  | `.py .js .ts .java .cpp .go .rb .php .rs .scala .txt .md .rst .json .csv .yaml/.yml .html .css .sql` | (built-in)          |
+| PDF                 | `.pdf`                                                             | `pypdf`             |
+| Word                | `.docx`                                                           | `docx2txt`          |
+| Excel               | `.xlsx`, `.xls`                                                   | `openpyxl` / `xlrd` |
+| PowerPoint          | `.pptx`                                                           | `python-pptx`       |
+| Images (OCR)        | `.png .jpg .jpeg .tif .tiff .bmp .gif .webp`                      | `pytesseract` + `Pillow` + Tesseract engine |
+
+Loaders import their dependency **lazily**, so a missing one disables only that
+file type (with a clear pip hint) — the rest still ingest. Install just the
+formats you need (see the optional lines in `requirements.txt`).
+
+**Image OCR** additionally needs the Tesseract engine installed on your system
+(`winget install UB-Mannheim.TesseractOCR` on Windows, `apt install tesseract-ocr`
+on Debian/Ubuntu, `brew install tesseract` on macOS). If it isn't on your PATH,
+set `TESSERACT_CMD` in `.env`. Legacy `.doc`/`.ppt` are not supported — convert
+them to `.docx`/`.pptx` first.
+
 ```
 python ingest.py
-# Example output: Ingested 52 chunks into Chroma at ./chroma_db
+# + report.pdf (12 section(s))
+# + sales.xlsx (3 section(s))
+# + deck.pptx (8 section(s))
+# Ingesting 52 chunks...
 ```
-2. Run the Interactive CLI
-Start the interactive chat interface to generate code or ask general questions.
+
+2. Define the Purpose (the system prompt)
+The assistant has no preset role. Choose one of:
+- `SYSTEM_PROMPT="..."` in `.env` (inline), or
+- `SYSTEM_PROMPT_FILE=./system_prompt.txt` (a file), or
+- set it live in the CLI: `/system You are an internal wiki; answer only from CONTEXT.`
+
+If none is set, a generic "answer from your knowledge base" prompt is used.
+
+3. Run the Interactive CLI
 ```python cli_chat.py```
+
+By default every request is answered with RAG (retrieve → answer in your role).
+Commands:
+| Command           | What it does                                            |
+|-------------------|---------------------------------------------------------|
+| `<anything>`      | Ask a question, answered from your ingested data         |
+| `/code <request>` | Generate structured, runnable file(s) for the request   |
+| `/system`         | Show the current role                                    |
+| `/system <text>`  | Set a new role for this session                          |
+| `/reset`          | Clear the conversation memory                            |
+| `/help`           | List commands                                            |
+| `quit` / `exit`   | Leave (memory is already saved each turn)               |
+
+Conversation history persists to `chat_history.json`.
+__________________________________________________________________________________________________________________
+
+🧠 Memory (durable · model-agnostic · self-compacting)
+Conversation memory (`memory.py`) is built to stay reliable as sessions get long
+and to behave consistently even if you switch models:
+- **Durable:** saved after *every* turn with an atomic write (temp file +
+  replace), so a crash or hard-close never loses or corrupts memory.
+- **Model-agnostic / shared:** stored as a natural-language summary plus plain
+  message records — nothing provider-specific. The same `chat_history.json`
+  works across Gemini / OpenAI / Ollama, giving consistent recollection when you
+  swap models. (Note: this applies to chat memory; the *vector store* must still
+  be ingested with one consistent embedding model.)
+- **Self-compacting:** when recent messages exceed `MEMORY_MAX_MESSAGES`, the
+  oldest are folded into a rolling summary (keeping the last `MEMORY_KEEP_RECENT`
+  verbatim), so prompts stay small and the assistant still remembers what it did.
+
+🔐 Safety
+- **Prompt-injection guard:** retrieved CONTEXT is wrapped in clear delimiters
+  and a fixed system rail tells the model to treat it as untrusted data, never
+  as instructions — so text planted in your dataset can't hijack the assistant.
+- **Sandboxed file writes:** `/code` saves are confined to `./generated_tests/`
+  via filename sanitization, an extension allowlist (no shell/batch types), a
+  path-escape check, and a per-file size cap (`MAX_GENERATED_FILE_BYTES`).
+- **Input cap:** requests are limited to `MAX_INPUT_CHARS`.
+- **Secrets:** keys are read only from the environment / git-ignored `.env` and
+  are never printed.
+__________________________________________________________________________________________________________________
+
+🧩 Optional: Inspecting a CSV
+`csv_ingest.py` is a small standalone helper (requires `pandas`) for loading and
+sanity-checking a CSV — schema, null counts — before you feed data into a
+pipeline. It is not wired into the RAG flow; use it directly:
+```python
+from csv_ingest import CSVIngest
+
+ci = CSVIngest("path/to/file.csv")
+ci.load_data()
+ci.analyze_schema()
+ci.detect_missing_attachments()
+```
 
